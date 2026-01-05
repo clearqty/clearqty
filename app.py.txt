@@ -1,0 +1,110 @@
+import streamlit as st
+import pandas as pd
+
+# --- CONFIGURATION & BRANDING ---
+st.set_page_config(page_title="ClearQty | Inventory Support", layout="wide", page_icon="📦")
+
+# Simple custom CSS for branding
+st.markdown("""
+    <style>
+    .main { background-color: #f5f7f9; }
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #e0e0e0; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- SIMPLE AUTHENTICATION ---
+def check_password():
+    """Returns True if the user had the correct password."""
+    if "authenticated" not in st.session_state:
+        st.title("🔐 ClearQty Login")
+        password = st.text_input("Enter Access Code", type="password")
+        if st.button("Login"):
+            if password == "clear2024":  # Change this to your desired password
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Invalid code")
+        return False
+    return True
+
+if check_password():
+    st.sidebar.title("ClearQty Navigation")
+    mode = st.sidebar.radio("Go to:", ["Bulk Planner", "Single SKU Lookup"])
+
+    # --- CORE CALCULATION LOGIC ---
+    def run_calculation(row):
+        lt = int(row['LeadTimeMonths'])
+        cover = row['DesiredCoverMonths']
+        stock = row['CurrentStock']
+        
+        # Monthly sales columns (assuming Month1, Month2, etc.)
+        month_cols = [f'Month{i}' for i in range(1, 13)]
+        sales_values = [row[m] for m in month_cols if m in row]
+        
+        # 1. Lead Time Demand (Forward Looking)
+        lt_demand = sum(sales_values[:lt])
+        
+        # 2. Average Monthly Sales
+        avg_sales = sum(sales_values) / len(sales_values) if sales_values else 0
+        
+        # 3. Target Stock Level
+        target_stock = lt_demand + (cover * avg_sales)
+        
+        # 4. Recommended QTY
+        rec_qty = max(0, round(target_stock - stock))
+        
+        # 5. Risk & Status
+        if stock < lt_demand:
+            status = "🔴 Stockout Risk"
+            explanation = f"Critically low! Current stock ({stock}) won't last the {lt}-month lead time ({lt_demand} units needed)."
+        elif stock < (lt_demand + avg_sales):
+            status = "🟡 Low Buffer"
+            explanation = "Stock covers lead time but provides less than 1 month of extra safety."
+        else:
+            status = "✅ Healthy"
+            explanation = "Stock levels are sufficient to cover lead time and target buffer."
+            
+        return pd.Series([lt_demand, round(avg_sales, 1), round(target_stock), rec_qty, status, explanation])
+
+    # --- MODE 1: BULK PLANNER ---
+    if mode == "Bulk Planner":
+        st.header("Bulk Replenishment Planner")
+        uploaded_file = st.file_uploader("Upload Inventory CSV", type=["csv"])
+
+        if uploaded_file:
+            df = pd.read_csv(uploaded_file)
+            calc_cols = ['LTDemand', 'AvgMonthlySales', 'TargetStock', 'OrderQTY', 'Status', 'Why']
+            df[calc_cols] = df.apply(run_calculation, axis=1)
+            
+            st.dataframe(df.style.apply(lambda x: ["background-color: #ffcccc" if v == "🔴 Stockout Risk" else "" for v in x], axis=1, subset=['Status']))
+            
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download Results", csv, "clearqty_plan.csv")
+
+    # --- MODE 2: SINGLE SKU ---
+    else:
+        st.header("Single SKU Decision Tool")
+        col1, col2 = st.columns(2)
+        with col1:
+            sku = st.text_input("SKU / Item Name", "Item-001")
+            lt = st.number_input("Lead Time (Months)", 1, 12, 4)
+            cover = st.number_input("Desired Cover (Months)", 1, 12, 3)
+            stock = st.number_input("Current Stock Position", 0, 10000, 50)
+        
+        with col2:
+            st.write("Enter 12-Month Forecast")
+            sales = [st.number_input(f"Month {i}", 0, 5000, 40, key=f"s{i}") for i in range(1, 13)]
+
+        # Run logic for single row
+        row_data = {'LeadTimeMonths': lt, 'DesiredCoverMonths': cover, 'CurrentStock': stock}
+        for i, s in enumerate(sales): row_data[f'Month{i+1}'] = s
+        
+        res = run_calculation(pd.Series(row_data))
+        
+        st.divider()
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Order Quantity", f"{res[3]} units")
+        m2.metric("Status", res[4])
+        m3.metric("Target Stock", int(res[2]))
+        
+        st.info(f"**Why?** {res[5]}")
